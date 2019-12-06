@@ -1,0 +1,111 @@
+---
+title: "Random Forests for Data Privacy"
+output: html_notebook
+---
+
+```{r}
+# packages
+library(randomForest)
+library(dplyr)
+library(cluster)
+library(entropy)
+library(ggplot2)
+
+# data
+synthetic <- read.csv("../import/1_PIF/our-synthetic.csv",
+                      stringsAsFactors = FALSE)
+```
+
+```{r}
+privacy_cluster <- function(x,k) {
+  rf <- randomForest::randomForest(x=x,ntree=1000,
+                      proximity = TRUE,
+                      keep.forest=TRUE)
+  clust_res <- cluster::pam(1-rf$proximity,k = k,diss=TRUE)
+  out <- bind_cols(x,cluster=as.factor(clust_res$clustering))
+  names(out) <- c(names(x),paste0("k",k))
+  out
+}
+
+aggregate <- function(x,kvar) {
+  nvars <- names(x)[sapply(x, is.numeric)]
+  fvars <- names(x)[sapply(x, is.factor)]
+  nvars <- nvars[nvars != kvar]
+  fvars <- fvars[fvars != kvar]
+
+  tmp1 <- x %>%
+    group_by_(kvar) %>%
+    summarise_at(c(nvars),mean)
+  tmp2 <- x %>%
+    #select_(c(fvars,kvar)) %>%
+    mutate_at(fvars,as.numeric) %>%
+    group_by_(kvar) %>%
+    summarise_at(fvars,mean)
+  tmp <- left_join(tmp1,tmp2)
+  
+  x_out <- x[kvar]
+  x_out <- left_join(x_out,tmp,kvar)
+  x_out[,-1]
+}
+
+compare_kls <- function(x1,x2) {
+  kls <- numeric(length = ncol(x1))
+  for (j in 1:ncol(x1)) {
+    if (is.factor(x1[[j]])) {
+      x1[[j]] <- as.numeric(x1[[j]])
+    }
+    kls[j] <- KL.plugin(x1[[j]], x2[[j]])
+  }
+  kls
+}
+```
+
+```{r}
+# select a subsample of the data
+synthetic_samp <- synthetic %>%
+  na.omit() %>%
+  select(gender,AGE,blood_group,eye_color) %>%
+  filter() %>%
+  slice(1:100) %>%
+  mutate_if(is.character, as.factor)
+
+# algorithm
+t1 <- privacy_cluster(synthetic_samp,k=10)
+t1_safe <- aggregate(t1,"k10")
+```
+
+
+```{r}
+ks <- 5:20
+ks_res <- matrix(nrow = length(ks),ncol=ncol(synthetic_samp))
+for (i in 1:length(ks)) {
+  tmp <- privacy_cluster(synthetic_samp,ks[i])
+  kname <- paste0("k",ks[i])
+  x2 <- aggregate(tmp,kname)
+  ks_res[i,] <- compare_kls(synthetic_samp,x2)
+}
+```
+
+
+```{r}
+ks_res <- data.frame(ks_res)
+ks_res <- tidyr::gather(ks_res)
+ks_res$k <- rep(ks,4)
+ks_res$x_axis <- rep(16:1,4)
+```
+
+```{r}
+p1 <- ggplot(ks_res) +
+  geom_point(aes(x=x_axis,y=value,col=key)) +
+  geom_line(aes(x=x_axis,y=value,col=key)) +
+  labs(x = "Increased aggregation",
+       y="Loss of utility",
+       title="Random forest aggregation") +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        text = element_text(size=15))
+p1
+ggsave(filename = "rf_method.png")
+```
+
+
